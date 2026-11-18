@@ -1,0 +1,44 @@
+name: Install smoke test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+          architecture: x64
+      - name: Install and check the source archive
+        shell: bash
+        env:
+          HF_HUB_OFFLINE: "1"
+          TRANSFORMERS_OFFLINE: "1"
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          scratch=$(mktemp -d "$RUNNER_TEMP/execorchestra-install.XXXXXX")
+          mkdir "$scratch/source"
+          git archive HEAD | tar -xf - -C "$scratch/source"
+          python -m venv "$scratch/venv"
+          source "$scratch/venv/bin/activate"
+          cd "$scratch/source/execorchestra"
+
+          python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python -m scripts.prepare_release init
+          python -c "import faiss, numpy, torch, transformers, sentence_transformers, retrieve; assert torch.version.cuda is None"
+          python -m sgar_mvp.main --help
+          python -m scripts.migration_check --stage source
