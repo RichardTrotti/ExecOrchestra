@@ -13,8 +13,10 @@ import time
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Sequence, Tuple
+from urllib.error import HTTPError, URLError
 
 import certifi
 import faiss
@@ -155,6 +157,28 @@ class QueryProfile:
             "profile_version": self.profile_version,
             "generation_metadata": self.generation_metadata,
         }
+
+
+@dataclass(frozen=True)
+class QueryProfileBatch:
+    """Completed query profiles in input order, with zero-based positions."""
+
+    start_index: int
+    profiles: tuple[QueryProfile, ...]
+
+    @property
+    def stop_index(self) -> int:
+        return self.start_index + len(self.profiles)
+
+
+class QueryProfileBatchError(RuntimeError):
+    """A batch failed before it could be returned to the caller."""
+
+    def __init__(self, start_index: int, stop_index: int, stage: str) -> None:
+        self.start_index = start_index
+        self.stop_index = stop_index
+        self.stage = stage
+        super().__init__(f"Query profile batch [{start_index}, {stop_index}) failed during {stage}")
 
 
 class HyDEGenerationError(RuntimeError):
@@ -1312,6 +1336,16 @@ def encode_query_profiles(
 ) -> List[QueryProfile]:
     """Batch-encode profiles; HyDE generation remains one request per query."""
 
+    generated = _generate_query_profile_batch(queries, use_hyde, hyde_workers, cost_ledger)
+    return _encode_generated_query_profile_batch(queries, generated, use_hyde)
+
+
+def _generate_query_profile_batch(
+    queries: Sequence[str],
+    use_hyde: bool,
+    hyde_workers: int | None,
+    cost_ledger: RunCostLedger | None,
+) -> List[Dict[str, Any]]:
     if use_hyde:
         _engine.ensure_loaded()
         worker_count = hyde_workers or int(os.environ.get("SGAR_HYDE_WORKERS", "6"))
@@ -1334,6 +1368,14 @@ def encode_query_profiles(
             }
             for query in queries
         ]
+    return generated
+
+
+def _encode_generated_query_profile_batch(
+    queries: Sequence[str],
+    generated: Sequence[Mapping[str, Any]],
+    use_hyde: bool,
+) -> List[QueryProfile]:
     text_pairs = [
         (str(item["capability_text"]), str(item["constraint_text"]))
         for item in generated
@@ -1362,6 +1404,59 @@ def encode_query_profiles(
         )
         for index, (capability_text, constraint_text) in enumerate(text_pairs)
     ]
+
+
+def _is_embedding_connection_failure(exc: Exception) -> bool:
+    if not isinstance(exc, RetrievalLifecycleError) or exc.failure_code != "embedding_api_request_failed":
+        return False
+    cause: object = exc.__cause__
+    if isinstance(cause, HTTPError):
+        return False
+    if isinstance(cause, URLError):
+        cause = cause.reason
+    return isinstance(cause, (TimeoutError, ConnectionError))
+
+
+def iter_query_profile_batches(
+    queries: Iterable[str],
+    *,
+    chunk_size: int = 32,
+    use_hyde: bool = True,
+    hyde_workers: int | None = None,
+    cost_ledger: RunCostLedger | None = None,
+    retry_embedding: bool = False,
+) -> Iterator[QueryProfileBatch]:
+    """Process one batch at a time and yield complete batches in input order.
+
+    A failed batch raises QueryProfileBatchError; previously yielded batches
+    remain valid. Opt in to one retry on an embedding connection failure.
+    That retry reuses this batch's generated texts and never calls HyDE again.
+    """
+    if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size <= 0:
+        raise ValueError("chunk_size must be a positive integer")
+
+    source = iter(queries)
+    start_index = 0
+    while chunk := list(islice(source, chunk_size)):
+        stop_index = start_index + len(chunk)
+        try:
+            generated = _generate_query_profile_batch(chunk, use_hyde, hyde_workers, cost_ledger)
+        except Exception as exc:
+            raise QueryProfileBatchError(start_index, stop_index, "generation") from exc
+
+        for attempt in range(2 if retry_embedding else 1):
+            try:
+                profiles = _encode_generated_query_profile_batch(chunk, generated, use_hyde)
+            except Exception as exc:
+                if attempt == 0 and retry_embedding and _is_embedding_connection_failure(exc):
+                    continue
+                raise QueryProfileBatchError(start_index, stop_index, "embedding") from exc
+            break
+
+        del generated
+        yield QueryProfileBatch(start_index, tuple(profiles))
+        del profiles
+        start_index = stop_index
 
 
 def encode_stored_query_profiles(

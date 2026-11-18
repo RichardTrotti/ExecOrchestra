@@ -139,3 +139,32 @@ Check usage completeness; keep agent-phase and end-to-end time separate.
 
 Optional semantic review is in `sgar_mvp/benchmarks/answer_validation.py`.
 It records assisted results and review cost separately from official scoring.
+
+## Stream query profiles in batches
+
+For custom retrieval evaluations, run from the prepared project directory and
+use the optional Python iterator to encode one group of queries at a time:
+
+```python
+from retrieve import iter_query_profile_batches
+
+with open("queries.txt", encoding="utf-8") as source:
+    queries = (line.strip() for line in source if line.strip())
+    for batch in iter_query_profile_batches(queries, chunk_size=32, use_hyde=False):
+        print(f"Completed [{batch.start_index}, {batch.stop_index}): {len(batch.profiles)} profiles")
+```
+
+`chunk_size` limits the queries in flight at the iterator level. Consume or
+save each batch before requesting the next one to keep memory from growing
+with the full input. This limits query count per batch; memory also depends on
+query lengths, embedding dimensions, and how many results the caller retains.
+`encode_query_profiles` still returns a single list, and the standard benchmark
+commands do not use this iterator.
+
+Each batch follows input order. A failure raises `QueryProfileBatchError` with
+the zero-based range `[start_index, stop_index)` and a `generation` or `embedding`
+stage. Doing so stops iteration; earlier batches remain usable. Set
+`retry_embedding=True` to allow one retry of the current batch's vector encoding
+on a connection failure. It reuses generated profile texts and makes no new
+HyDE requests. Retries are disabled by default and are not attempted on HTTP
+error responses. The iterator does not save progress across processes.
