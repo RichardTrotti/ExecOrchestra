@@ -652,12 +652,15 @@ def infer_hard_requirements(query: str) -> Dict[str, Any]:
         "json": ("json",),
         "csv": ("csv",),
         "markdown": ("markdown", ".md"),
-        "code": ("code", '\u4ee3\u7801', '\u6e90\u7801'),
+        "code": ('\u4ee3\u7801', '\u6e90\u7801'),
         "pdf": ("pdf",),
         "image": ("image", '\u56fe\u7247', '\u56fe\u50cf'),
     }
+    # Match English "code" as a token while preserving CJK and filename boundaries.
     for artifact, terms in artifact_terms.items():
-        if any(term in lowered for term in terms):
+        if any(term in lowered for term in terms) or (
+            artifact == "code" and re.search(r"(?<![a-z0-9])code(?![a-z0-9])", lowered)
+        ):
             output_artifacts.append(artifact)
 
     min_context_tokens: int | None = None
