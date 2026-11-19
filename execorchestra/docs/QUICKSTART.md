@@ -110,8 +110,8 @@ python -m scripts.prepare_release check
 
 Runtime identity, receipt, and output-contract checks remain enabled. Repeat the
 relevant preparation stages after changing the endpoint, model profile, runtime
-image, or resource configuration. Preserve prior records and index directories
-before rebuilding them; the index command refuses to overwrite an existing index.
+image, or resource configuration. Keep the previous index and its matching
+policy together when rebuilding. [Index lifecycle and rollback](MIGRATION.md#index-lifecycle-and-rollback)
 
 ## 5. Execute and inspect the delivered file
 
